@@ -1,0 +1,237 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>OpsPilot AI</title>
+<style>
+*{box-sizing:border-box}
+body{margin:0;background:#0b1220;color:#e9eef5;font-family:Segoe UI,Arial,sans-serif}
+header{padding:24px 6%;border-bottom:1px solid #263246;background:#101a2b}
+.brand{font-size:24px;font-weight:800}
+.brand span{color:#34d399}
+.sub{color:#9eacc1;margin-top:6px}
+main{max-width:1100px;margin:30px auto;padding:0 20px;display:grid;grid-template-columns:1fr 1fr;gap:20px}
+.panel{background:#111c2e;border:1px solid #26364c;border-radius:16px;padding:22px}
+h2{font-size:18px;margin-top:0}
+label{display:block;margin:16px 0 7px;color:#b8c5d7;font-size:13px}
+textarea,input{width:100%;background:#0a1322;color:#e9eef5;border:1px solid #31425a;border-radius:9px;padding:12px;font:inherit}
+textarea{min-height:110px;resize:vertical}
+button{margin-top:16px;width:100%;padding:13px;border:0;border-radius:9px;background:#10b981;color:#06291f;font-weight:800;cursor:pointer}
+button:disabled{opacity:.5}
+button.secondary{background:#203149;color:#e9eef5;border:1px solid #3b4d65}
+.hint{color:#91a1b7;font-size:12px;line-height:1.5}
+#result{line-height:1.65;overflow-wrap:anywhere;font-size:14px}
+#result h3{margin:20px 0 6px;color:#a7f3d0;font-size:14px}
+#result p{margin:0}
+#result ul,#result ol{margin:6px 0;padding-left:22px}
+.report-meta{display:flex;flex-wrap:wrap;gap:8px;margin:14px 0}
+.report-meta span{padding:4px 9px;border:1px solid #31425a;border-radius:999px;color:#cbd5e1;font-size:12px}
+.report-health{font-family:Consolas,monospace;white-space:pre-wrap}
+.status{color:#6ee7b7;font-size:12px}
+@media(max-width:760px){main{grid-template-columns:1fr}.panel{padding:17px}}
+</style>
+</head>
+<body>
+<header>
+  <div class="brand">OpsPilot <span>AI</span></div>
+  <div class="sub">Evidence-first IT incident diagnostics</div>
+</header>
+<main>
+  <section class="panel">
+    <h2>New diagnostic</h2>
+
+    <label for="incident">Describe the incident</label>
+    <textarea id="incident" maxlength="4000">My API returns HTTP 500 after deployment</textarea>
+
+    <label for="logs">Relevant logs</label>
+    <textarea id="logs">ERROR database connection refused
+HTTP 500 Internal Server Error</textarea>
+
+    <label for="url">Local health-check URL (optional)</label>
+    <input id="url" placeholder="http://127.0.0.1:4000/api/health">
+
+    <p class="hint">
+      Paste sanitized logs only. Never include passwords, API keys,
+      access tokens, or private data. Only localhost health checks are allowed.
+    </p>
+    <button id="run">Run diagnostics</button>
+  </section>
+
+  <section class="panel">
+    <h2>Diagnostic report</h2>
+    <div class="status" id="status">Ready</div>
+    <div id="result" style="margin-top:16px" aria-live="polite">
+      Submit an incident to see the diagnostic report.
+    </div>
+    <button id="download-report" class="secondary" type="button" hidden disabled>
+      Download PDF report
+    </button>
+  </section>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+let currentReport = null;
+
+function appendSection(title, content, listType) {
+  const heading = document.createElement("h3");
+  heading.textContent = title;
+  $("result").appendChild(heading);
+
+  if (listType && content.length) {
+    const list = document.createElement(listType);
+    content.forEach(item => {
+      const entry = document.createElement("li");
+      entry.textContent = item;
+      list.appendChild(entry);
+    });
+    $("result").appendChild(list);
+    return;
+  }
+
+  const paragraph = document.createElement("p");
+  paragraph.textContent = content || "None provided.";
+  $("result").appendChild(paragraph);
+}
+
+function renderDiagnosis(data) {
+  const diagnosis = data.diagnosis;
+  $("result").replaceChildren();
+
+  const summary = document.createElement("div");
+  summary.className = "report-summary";
+  const summaryHeading = document.createElement("h3");
+  summaryHeading.textContent = "Summary";
+  const summaryText = document.createElement("p");
+  summaryText.textContent = diagnosis.summary || "No summary provided.";
+  summary.append(summaryHeading, summaryText);
+  $("result").appendChild(summary);
+
+  const meta = document.createElement("div");
+  meta.className = "report-meta";
+  for (const [label, value] of [
+    ["Severity", diagnosis.severity],
+    ["Confidence", diagnosis.confidence],
+    ["Mode", diagnosis.mode]
+  ]) {
+    if (value) {
+      const badge = document.createElement("span");
+      badge.textContent = `${label}: ${value}`;
+      meta.appendChild(badge);
+    }
+  }
+  $("result").appendChild(meta);
+
+  appendSection("Evidence", diagnosis.evidence || [], "ul");
+  appendSection("Recommendations", diagnosis.recommendations || [], "ol");
+  appendSection(
+    "Health check",
+    data.health_check ? JSON.stringify(data.health_check, null, 2) : "Not requested"
+  );
+  $("result").lastElementChild.classList.add("report-health");
+
+  currentReport = {
+    incident: diagnosis.incident || $("incident").value.trim(),
+    summary: diagnosis.summary || "No summary provided.",
+    severity: diagnosis.severity || "Unknown",
+    confidence: diagnosis.confidence || "Not specified",
+    evidence: diagnosis.evidence || [],
+    recommendations: diagnosis.recommendations || [],
+    model: diagnosis.model || "Not specified"
+  };
+  $("download-report").hidden = false;
+  $("download-report").disabled = false;
+}
+
+$("run").addEventListener("click", async () => {
+  const incident = $("incident").value.trim();
+
+  if (incident.length < 5) {
+    $("result").textContent = "Describe the incident in at least 5 characters.";
+    return;
+  }
+
+  $("run").disabled = true;
+  $("download-report").hidden = true;
+  $("download-report").disabled = true;
+  currentReport = null;
+  $("status").textContent = "Analyzing...";
+  $("result").textContent = "Running diagnostics...";
+
+  try {
+    const response = await fetch("/api/diagnose", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({
+        incident,
+        logs: $("logs").value,
+        health_url: $("url").value.trim() || null
+      })
+    });
+
+    const data = await response.json();
+    if (!response.ok) {
+      throw new Error(data.detail || "Request failed");
+    }
+
+    renderDiagnosis(data);
+    $("status").textContent = "Diagnostic complete";
+  } catch (error) {
+    $("status").textContent = "Error";
+    $("result").textContent = error.message;
+  } finally {
+    $("run").disabled = false;
+  }
+});
+
+$("download-report").addEventListener("click", async () => {
+  if (!currentReport) return;
+
+  const button = $("download-report");
+  button.disabled = true;
+  $("status").textContent = "Generating PDF...";
+
+  try {
+    const response = await fetch("/api/reports", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify(currentReport)
+    });
+
+    if (!response.ok) {
+      let detail = "Could not generate the PDF report.";
+      try {
+        const error = await response.json();
+        detail = error.detail || detail;
+      } catch {
+        // Keep the user-facing error when the server did not return JSON.
+      }
+      throw new Error(detail);
+    }
+
+    const contentType = response.headers.get("content-type") || "";
+    if (!contentType.includes("application/pdf")) {
+      throw new Error("The report service returned an invalid file.");
+    }
+
+    const objectUrl = URL.createObjectURL(await response.blob());
+    const link = document.createElement("a");
+    link.href = objectUrl;
+    link.download = "opspilot-incident-report.pdf";
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
+    $("status").textContent = "PDF report downloaded";
+  } catch (error) {
+    $("status").textContent = "PDF generation failed";
+    $("result").appendChild(document.createTextNode(` ${error.message}`));
+  } finally {
+    button.disabled = false;
+  }
+});
+</script>
+</body>
+</html>
