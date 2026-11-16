@@ -1,5 +1,11 @@
 
 import os
+import json
+import logging
+import re
+import sqlite3
+import time
+import uuid
 from pathlib import Path
 
 import httpx
@@ -29,6 +35,40 @@ REPORT_SERVICE_URL = os.getenv(
     "REPORT_SERVICE_URL", "http://127.0.0.1:3001"
 ).rstrip("/")
 REPORT_API_TOKEN = os.getenv("REPORT_API_TOKEN", "")
+DATABASE_PATH = Path(os.getenv("DATABASE_PATH", str(PROJECT_ROOT / "data" / "opspilot.db")))
+logger = logging.getLogger("opspilot")
+REQUEST_COUNT = 0
+REQUEST_ERRORS = 0
+
+
+def _initialize_database():
+    DATABASE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(DATABASE_PATH) as connection:
+        connection.execute("""CREATE TABLE IF NOT EXISTS incidents (
+            id TEXT PRIMARY KEY, created_at TEXT NOT NULL, incident TEXT NOT NULL,
+            diagnosis TEXT NOT NULL
+        )""")
+
+
+@app.middleware("http")
+async def observe_requests(request, call_next):
+    global REQUEST_COUNT, REQUEST_ERRORS
+    supplied_id = request.headers.get("x-request-id", "")
+    request_id = supplied_id if re.fullmatch(r"[A-Za-z0-9._-]{1,64}", supplied_id) else str(uuid.uuid4())
+    started = time.perf_counter()
+    try:
+        response = await call_next(request)
+    except Exception:
+        REQUEST_ERRORS += 1
+        logger.exception("request_failed request_id=%s path=%s", request_id, request.url.path)
+        raise
+    REQUEST_COUNT += 1
+    REQUEST_ERRORS += int(response.status_code >= 500)
+    response.headers["X-Request-ID"] = request_id
+    logger.info("request_complete request_id=%s method=%s path=%s status=%s duration_ms=%.1f",
+                request_id, request.method, request.url.path, response.status_code,
+                (time.perf_counter() - started) * 1000)
+    return response
 
 app.mount(
     "/static",
@@ -60,6 +100,7 @@ async def dashboard():
 
 @app.get("/api/health")
 async def health():
+    _initialize_database()
     return {
         "status": "ok",
         "service": "opspilot-api",
@@ -67,6 +108,37 @@ async def health():
             REPORT_SERVICE_URL and REPORT_API_TOKEN
         ),
     }
+
+
+@app.get("/api/ready")
+async def readiness():
+    try:
+        _initialize_database()
+        with sqlite3.connect(DATABASE_PATH, timeout=1) as connection:
+            connection.execute("SELECT 1")
+        return {"status": "ready", "database": "ok"}
+    except sqlite3.Error as exc:
+        raise HTTPException(status_code=503, detail="Database unavailable") from exc
+
+
+@app.get("/metrics", include_in_schema=False)
+async def metrics():
+    return Response(
+        f"# HELP opspilot_http_requests_total HTTP requests handled\n# TYPE opspilot_http_requests_total counter\nopspilot_http_requests_total {REQUEST_COUNT}\n# HELP opspilot_http_errors_total HTTP 5xx responses\n# TYPE opspilot_http_errors_total counter\nopspilot_http_errors_total {REQUEST_ERRORS}\n",
+        media_type="text/plain; version=0.0.4",
+    )
+
+
+@app.get("/api/incidents")
+async def incident_history(limit: int = 20):
+    _initialize_database()
+    limit = max(1, min(limit, 100))
+    with sqlite3.connect(DATABASE_PATH) as connection:
+        connection.row_factory = sqlite3.Row
+        rows = connection.execute(
+            "SELECT id, created_at, incident, diagnosis FROM incidents ORDER BY created_at DESC LIMIT ?", (limit,)
+        ).fetchall()
+    return [{**dict(row), "diagnosis": json.loads(row["diagnosis"])} for row in rows]
 
 
 @app.post("/api/diagnose")
@@ -94,6 +166,13 @@ async def diagnose(payload: DiagnoseRequest):
         result.setdefault("evidence", [])
         result.setdefault("recommendations", [])
         result["incident"] = payload.incident
+        _initialize_database()
+        with sqlite3.connect(DATABASE_PATH) as connection:
+            connection.execute(
+                "INSERT INTO incidents (id, created_at, incident, diagnosis) VALUES (?, ?, ?, ?)",
+                (str(uuid.uuid4()), time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                 payload.incident, json.dumps(result, ensure_ascii=False)),
+            )
 
         health_check = next(
             (

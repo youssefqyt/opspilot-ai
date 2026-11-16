@@ -69,11 +69,36 @@ HTTP 500 Internal Server Error</textarea>
       Download PDF report
     </button>
   </section>
+  <section class="panel" style="grid-column:1/-1">
+    <h2>Recent incidents</h2>
+    <p class="hint">Recent diagnoses are stored locally in the configured SQLite database.</p>
+    <div id="history" class="hint" aria-live="polite">Loading incident history…</div>
+  </section>
 </main>
 
 <script>
 const $ = id => document.getElementById(id);
 let currentReport = null;
+
+async function loadHistory() {
+  const target = $("history");
+  try {
+    const response = await fetch("/api/incidents?limit=10");
+    if (!response.ok) throw new Error("History unavailable");
+    const incidents = await response.json();
+    if (!incidents.length) { target.textContent = "No incidents recorded yet."; return; }
+    const list = document.createElement("ul");
+    incidents.forEach(item => {
+      const row = document.createElement("li");
+      const date = new Date(item.created_at).toLocaleString();
+      row.textContent = `${date} · ${item.diagnosis.severity || "unknown"} · ${item.incident}`;
+      list.appendChild(row);
+    });
+    target.replaceChildren(list);
+  } catch {
+    target.textContent = "Incident history is currently unavailable.";
+  }
+}
 
 function appendSection(title, content, listType) {
   const heading = document.createElement("h3");
@@ -177,6 +202,7 @@ $("run").addEventListener("click", async () => {
     }
 
     renderDiagnosis(data);
+    loadHistory();
     $("status").textContent = "Diagnostic complete";
   } catch (error) {
     $("status").textContent = "Error";
@@ -185,6 +211,8 @@ $("run").addEventListener("click", async () => {
     $("run").disabled = false;
   }
 });
+
+loadHistory();
 
 $("download-report").addEventListener("click", async () => {
   if (!currentReport) return;

@@ -4,3 +4,8 @@ __pycache__/
 .pytest_cache/
 .env
 *.pyc
+data/
+node_modules/
+report_service/node_modules/
+coverage/
+.coverage
